@@ -1,3 +1,4 @@
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -264,23 +265,108 @@ loadLocal();renderAll();revisionRender();
 
 <script type="module">
 import {initializeApp} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
-import {getAuth,GoogleAuthProvider,signInWithRedirect,getRedirectResult,onAuthStateChanged,signOut} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
-import {getFirestore,doc,getDoc,setDoc,serverTimestamp,collection,getDocs,query,limit} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
+import {getAuth,GoogleAuthProvider,signInWithPopup,setPersistence,browserLocalPersistence,onAuthStateChanged,signOut} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
+import {getFirestore,doc,getDoc,setDoc,serverTimestamp,collection,getDocs} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
 import {firebaseConfig} from './firebase-config.js';
-const authScreen=document.getElementById('authScreen'),appEl=document.getElementById('app'),msg=document.getElementById('authMsg'),fileWarn=document.getElementById('fileWarn');let auth,db,currentCloudUser=null,currentAlias='';
-const ready=firebaseConfig.apiKey&&!firebaseConfig.apiKey.includes('PASTE_')&&firebaseConfig.projectId&&!firebaseConfig.projectId.includes('PASTE_');
+
+const authScreen=document.getElementById('authScreen');
+const appEl=document.getElementById('app');
+const msg=document.getElementById('authMsg');
+const fileWarn=document.getElementById('fileWarn');
+const loginBtn=document.getElementById('googleSignIn');
+let auth=null,db=null,currentCloudUser=null,currentAlias='',authBusy=false;
+
+const ready=Boolean(firebaseConfig?.apiKey && firebaseConfig?.projectId && !String(firebaseConfig.apiKey).includes('PASTE_') && !String(firebaseConfig.projectId).includes('PASTE_'));
 function setMsg(t,cls=''){msg.className='small login-state '+cls;msg.textContent=t}
-function setSync(t){document.getElementById('syncStatus').textContent=t}
-if(location.protocol==='file:'){fileWarn.classList.remove('hidden');const b=document.getElementById('googleSignIn');b.disabled=true;setMsg('Open run-local.bat or the GitHub Pages version first.','error-msg')}
+function setSync(t){const el=document.getElementById('syncStatus');if(el)el.textContent=t}
+function showLogin(){authScreen.style.display='flex';appEl.style.display='none'}
+function showApp(){authScreen.style.display='none';appEl.style.display='block'}
+function setLoginBusy(busy,text='Continue with Google'){authBusy=busy;loginBtn.disabled=busy;loginBtn.textContent=text}
+
+if(location.protocol==='file:'){fileWarn.classList.remove('hidden');setLoginBusy(true);setMsg('Open the GitHub Pages website or run through localhost.','error-msg')}
+
 function profileModal(user,existing={}){return `<div class="title">👋 Welcome to StudyBot</div><div class="muted small">Google account: ${esc(user.email||'')}</div><div style="height:10px"></div><label class="small muted">Student name</label><input id="profileName" value="${escAttr(existing.name||user.displayName||'')}" placeholder="Your full name"><div style="height:8px"></div><label class="small muted">Roll number</label><input id="profileRoll" value="${escAttr(existing.rollNumber||'')}" placeholder="Example: 12"><div style="margin-top:12px"><button class="btn" onclick="window.finishProfile()">Save and continue</button></div>`}
-window.studybotSignOut=async()=>{if(auth)await signOut(auth)};
-window.finishProfile=async()=>{const name=document.getElementById('profileName').value.trim(),roll=document.getElementById('profileRoll').value.trim();if(!name||!roll){setMsg('Please enter your name and roll number.','error-msg');return}await setDoc(doc(db,'users',currentCloudUser.uid),{name,rollNumber:roll,email:currentCloudUser.email||'',photoURL:currentCloudUser.photoURL||'',role:'student',publicAlias:makeAlias(currentCloudUser.uid),updatedAt:serverTimestamp()},{merge:true});closeModal();await finishLogin()};
+
+window.studybotSignOut=async()=>{try{if(auth)await signOut(auth)}catch(e){setMsg('Sign out failed: '+(e.message||e.code),'error-msg')}};
+
+window.finishProfile=async()=>{try{const name=document.getElementById('profileName').value.trim();const roll=document.getElementById('profileRoll').value.trim();if(!name||!roll){toast('Enter your name and roll number');return}await setDoc(doc(db,'users',currentCloudUser.uid),{name,rollNumber:roll,email:currentCloudUser.email||'',photoURL:currentCloudUser.photoURL||'',role:'student',publicAlias:makeAlias(currentCloudUser.uid),updatedAt:serverTimestamp()},{merge:true});closeModal();await finishLogin(currentCloudUser)}catch(e){setMsg('Could not save your student profile: '+(e.message||e.code),'error-msg')}};
+
 function makeAlias(uid){let h=0;for(const ch of String(uid)){h=((h<<5)-h)+ch.charCodeAt(0);h|=0}return 'Student '+String(Math.abs(h)%9000+1000)}
-async function finishLogin(){const ref=doc(db,'users',currentCloudUser.uid),snap=await getDoc(ref);if(!snap.exists()){showModal(profileModal(currentCloudUser));return}let profile=snap.data();if(!profile.name||!profile.rollNumber){showModal(profileModal(currentCloudUser,profile));return}if(!profile.publicAlias){profile.publicAlias=makeAlias(currentCloudUser.uid);await setDoc(ref,{publicAlias:profile.publicAlias},{merge:true})}const prog=await getDoc(doc(db,'progress',currentCloudUser.uid));if(prog.exists()&&prog.data().state)window.studybotSetState(prog.data().state);else await setDoc(doc(db,'progress',currentCloudUser.uid),{state:window.studybotGetState(),updatedAt:serverTimestamp()});currentAlias=profile.publicAlias||makeAlias(currentCloudUser.uid);const currentState=window.studybotGetState();await setDoc(doc(db,'leaderboard',currentCloudUser.uid),{publicAlias:currentAlias,points:currentState.activity?.points||0,streak:currentState.activity?.streak||0,updatedAt:serverTimestamp()},{merge:true});authScreen.style.display='none';appEl.style.display='block';document.getElementById('profileChip').innerHTML=`${profile.photoURL?`<img src="${escAttr(profile.photoURL)}" alt="">`:''}<span class="small">${esc(profile.name)} • Roll ${esc(profile.rollNumber)}</span>`;setSync('☁️ Progress synced to your Google account');renderAll()}
+
+async function finishLogin(user){
+  if(!user||!db)return;
+  currentCloudUser=user;
+  setMsg('Signed in with Google. Loading your StudyBot account…','success-msg');
+  setSync('☁️ Loading your cloud progress…');
+  try{
+    const ref=doc(db,'users',user.uid);
+    const snap=await getDoc(ref);
+    if(!snap.exists()){showModal(profileModal(user));return}
+    let profile=snap.data();
+    if(!profile.name||!profile.rollNumber){showModal(profileModal(user,profile));return}
+    if(!profile.publicAlias){profile.publicAlias=makeAlias(user.uid);await setDoc(ref,{publicAlias:profile.publicAlias},{merge:true})}
+    const prog=await getDoc(doc(db,'progress',user.uid));
+    if(prog.exists()&&prog.data().state){window.studybotSetState(prog.data().state)}
+    else{await setDoc(doc(db,'progress',user.uid),{state:window.studybotGetState(),updatedAt:serverTimestamp()})}
+    currentAlias=profile.publicAlias||makeAlias(user.uid);
+    const currentState=window.studybotGetState();
+    await setDoc(doc(db,'leaderboard',user.uid),{publicAlias:currentAlias,points:currentState.activity?.points||0,streak:currentState.activity?.streak||0,updatedAt:serverTimestamp()},{merge:true});
+    showApp();
+    document.getElementById('profileChip').innerHTML=`${profile.photoURL?`<img src="${escAttr(profile.photoURL)}" alt="">`:''}<span class="small">${esc(profile.name)} • Roll ${esc(profile.rollNumber)}</span>`;
+    setSync('☁️ Progress synced to your Google account');
+    setLoginBusy(false);
+    renderAll();
+  }catch(e){
+    showLogin();
+    setSync('⚠️ Cloud connection failed');
+    setLoginBusy(false);
+    setMsg('Google login worked, but StudyBot could not load your account. '+(e.message||e.code||'Unknown error'),'error-msg');
+  }
+}
+
 window.studybotCloudSave=async(st)=>{if(!currentCloudUser||!db)return;try{await setDoc(doc(db,'progress',currentCloudUser.uid),{state:st,updatedAt:serverTimestamp()});await setDoc(doc(db,'leaderboard',currentCloudUser.uid),{publicAlias:currentAlias||makeAlias(currentCloudUser.uid),points:st.activity?.points||0,streak:st.activity?.streak||0,updatedAt:serverTimestamp()},{merge:true});setSync('☁️ Saved to cloud')}catch(e){setSync('⚠️ Cloud save failed — check Firebase setup')}};
 window.studybotGetLeaderboard=async()=>{if(!db)return[];const snap=await getDocs(collection(db,'leaderboard'));return snap.docs.map(d=>d.data()).sort((a,b)=>(b.points||0)-(a.points||0)).slice(0,10)};
-document.getElementById('googleSignIn').onclick=async()=>{if(location.protocol==='file:'){setMsg('Google sign-in needs localhost or GitHub Pages. Use run-local.bat.','error-msg');return}if(!ready){setMsg('Firebase is not configured. Fill firebase-config.js first.','error-msg');return}const btn=document.getElementById('googleSignIn');btn.disabled=true;btn.textContent='Redirecting to Google…';setMsg('Redirecting to Google sign-in…');try{await signInWithRedirect(auth,new GoogleAuthProvider())}catch(e){btn.disabled=false;btn.textContent='Continue with Google';setMsg('Google sign-in failed: '+(e.message||e.code),'error-msg')}};
-if(ready&&location.protocol!=='file:'){const app=initializeApp(firebaseConfig);auth=getAuth(app);db=getFirestore(app);getRedirectResult(auth).catch(e=>setMsg('Redirect sign-in failed: '+(e.message||e.code),'error-msg'));onAuthStateChanged(auth,async(user)=>{currentCloudUser=user;if(!user){authScreen.style.display='flex';appEl.style.display='none';return}try{await finishLogin()}catch(e){setMsg('Could not load your student account: '+e.message,'error-msg')}})}else if(!ready&&location.protocol!=='file:'){setMsg('Setup needed: configure firebase-config.js.','error-msg')}
+
+async function loginWithGoogle(){
+  if(location.protocol==='file:'){setMsg('Google sign-in needs the GitHub Pages website or localhost.','error-msg');return}
+  if(!ready){setMsg('Firebase is not configured. Check firebase-config.js.','error-msg');return}
+  if(!auth||authBusy)return;
+  setLoginBusy(true,'Opening Google sign-in…');
+  setMsg('Opening Google sign-in…');
+  try{
+    await setPersistence(auth,browserLocalPersistence);
+    const result=await signInWithPopup(auth,new GoogleAuthProvider());
+    setMsg('Google account verified. Loading StudyBot…','success-msg');
+    await finishLogin(result.user);
+  }catch(e){
+    setLoginBusy(false);
+    const code=e?.code||'';
+    let message=e?.message||code||'Unknown error';
+    if(code==='auth/popup-blocked')message='Chrome blocked the Google sign-in popup. Allow popups for znxzinex.github.io and try again.';
+    else if(code==='auth/popup-closed-by-user')message='The Google sign-in window was closed before login finished.';
+    else if(code==='auth/unauthorized-domain')message='Firebase is rejecting this website domain. Add znxzinex.github.io under Authentication → Settings → Authorized domains.';
+    else if(code==='auth/operation-not-allowed')message='Google Sign-In is not enabled in Firebase Authentication.';
+    setMsg('Google sign-in failed: '+message,'error-msg');
+  }
+}
+
+loginBtn.addEventListener('click',loginWithGoogle);
+
+if(ready&&location.protocol!=='file:'){
+  const firebaseApp=initializeApp(firebaseConfig);
+  auth=getAuth(firebaseApp);
+  db=getFirestore(firebaseApp);
+  setPersistence(auth,browserLocalPersistence).catch(()=>{});
+  onAuthStateChanged(auth,async(user)=>{
+    currentCloudUser=user;
+    if(user&&!authBusy){
+      try{await finishLogin(user)}catch(e){setMsg('Could not load your student account: '+(e.message||e.code),'error-msg');setLoginBusy(false)}
+    }else if(!user){
+      showLogin();
+      setLoginBusy(false);
+    }
+  });
+}else if(!ready&&location.protocol!=='file:'){setMsg('Setup needed: configure firebase-config.js.','error-msg')}
 </script>
 </body>
 </html>
