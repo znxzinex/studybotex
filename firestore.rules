@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function isAdmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /users/{uid} {
+      allow create: if isSelf(uid) && request.resource.data.role == 'student';
+      allow read: if isSelf(uid) || isAdmin();
+      allow update: if isAdmin() || (isSelf(uid) && request.resource.data.role == resource.data.role);
+      allow delete: if isAdmin();
+    }
+
+    match /progress/{uid} {
+      allow create, read, update, delete: if isSelf(uid) || isAdmin();
+    }
+
+    // Anonymous leaderboard data: signed-in students may read rankings, but can only write their own row.
+    match /leaderboard/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isSelf(uid);
+      allow delete: if isAdmin();
+    }
+  }
+}
